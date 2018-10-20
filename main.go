@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 const folderNameBase = "nexcenter"
@@ -19,26 +20,31 @@ type Folder struct {
 
 func (f *Folder) checkoutDevelop() {
 	fmt.Printf("%s app: checking out develop\n", f.app)
-	checkout := []string{"checkout", "develop"}
-	f.runCommand(f.path, "git", checkout)
+	args := []string{"checkout", "develop"}
+	f.runCommand(f.path, "git", args)
 }
 
 func (f *Folder) pullDevelop() {
 	fmt.Printf("%s app: pulling develop\n", f.app)
-	pull := []string{"pull"}
-	f.runCommand(f.path, "git", pull)
+	f.runCommand(f.path, "git", []string{"pull"})
 }
 
 func (f *Folder) npmInstall() {
 	fmt.Printf("%s app: installing node modules, please wait\n", f.app)
-	install := []string{"install"}
-	f.runCommand(f.path, "npm", install)
+	f.runCommand(f.path, "npm", []string{"install"})
 }
 
 func (f *Folder) build() {
 	cmd := "node_modules/.bin/webpack"
 	args := []string{"--config", "webpack.dev.js", "--progress"}
 	f.runCommand(f.path, cmd, args)
+}
+
+func (f *Folder) linkToCore() {
+	core := fmt.Sprintf("%s-%s-core", f.base, f.platform)
+	args := []string{"link", core}
+	f.runCommand(f.path, "npm", args)
+	fmt.Printf("%s app: linked to %s\n", f.app, core)
 }
 
 func (f *Folder) runCommand(path, command string, args []string) {
@@ -63,7 +69,7 @@ func (f *Folder) runCommand(path, command string, args []string) {
 func getFolders(absPath string, files []os.FileInfo) map[string]Folder {
 	folders := make(map[string]Folder)
 	for _, f := range files {
-		// Only send folders we want to runCommand in
+		// Only send folders of the nexcenter app
 		var platform, app string
 		splitName := strings.Split(f.Name(), "-")
 		base := splitName[0]
@@ -81,11 +87,18 @@ func processApp(f Folder) {
 	f.checkoutDevelop()
 	f.pullDevelop()
 	f.npmInstall()
-	f.build()
+	// f.build()
+	f.linkToCore()
 }
 
-//ignore cores
-//npm link cores
+func processCore(f Folder) {
+	f.checkoutDevelop()
+	f.pullDevelop()
+	f.npmInstall()
+	// Create NPM link
+	f.runCommand(f.path, "npm", []string{"link"})
+	fmt.Printf("NPM link successfully created for %s-%s-%s\n\n", f.base, f.platform, f.app)
+}
 
 func main() {
 	files, err := ioutil.ReadDir("./")
@@ -96,9 +109,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to get absolute path. %v", err)
 	}
-	for _, folder := range getFolders(absPath, files) {
+	folders := getFolders(absPath, files)
+	// Process core first
+	processCore(folders["core"])
+
+	var wg sync.WaitGroup
+	// How many goRoutines will be run (folders - core)
+	wg.Add(len(folders) - 1)
+	for _, folder := range folders {
 		if folder.app != "core" {
-			processApp(folder)
+			// Need to pass folder into go routine for async reasons
+			go func(folder Folder) {
+				defer wg.Done()
+				processApp(folder)
+			}(folder)
 		}
 	}
+	wg.Wait()
 }
